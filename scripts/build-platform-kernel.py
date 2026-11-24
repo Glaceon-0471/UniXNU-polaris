@@ -92,7 +92,7 @@ def main():
         parser.error('the base checkout does not match upstream.json')
     # These are the only common submodules this source-kernel milestone uses.
     subprocess.run(['git', '-C', base, 'submodule', 'update', '--init', '--depth', '1',
-                    'drivers/ArmDTPlatform', 'drivers/NativeUfs', 'kits/NativePrelink'], check=True)
+                    'drivers/ArmDTPlatform', 'drivers/NativeUfs', 'drivers/NativeMobileDisplay', 'drivers/NativeAES', 'kits/NativePrelink'], check=True)
     sys.path.insert(0, str(base / 'scripts'))
     from unixnu import cli, feeds, kernel, tree
     from unixnu.config import Context, parse_config
