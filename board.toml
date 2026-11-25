@@ -26,6 +26,11 @@ archives = [
   # NativeRamBlock requires it (build-xnu-4k-baseline.sh:176-181), and the Data
   # volume mount requires NativeRamBlock: APFS refuses /dev/md0 with ENOENT, as
   # alioth measured on hardware ("offline scratch Data mount failed: 2").
+  # build-arm-driver.py NativeAES must run FIRST: it compiles NativeAES.o into
+  # build/native-aes/ and creates that directory, which build-native-aes-bindings.py
+  # then writes original-bindings.o into and archives as libNativeAES.a.
+  "build-arm-driver.py NativeAES",
+  "build-native-aes-bindings.py",
   "build-native-aes-bindings.py",
   "build-libpthread-kernel.py",
   "build-mockfs-fixture.py",
