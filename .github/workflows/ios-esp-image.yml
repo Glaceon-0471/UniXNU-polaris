@@ -1,0 +1,133 @@
+name: iOS-stage ESP image
+# Builds the prelink-era ESP: prelinked kernel + iPad-identity ADT + trust bundle,
+# packed into a FAT image by make-ios-esp.py (mtools).
+#
+# Why this is separate from esp-image.yml: that one assembles the *platform*
+# (route A) ESP from a source kernel via make-payload-esp.py, which refuses a
+# prelinked kernel by design. This one takes the prelinked kernel from
+# kernel.yml and the trust caches from the pinned IPSW.
+on:
+  workflow_dispatch:
+    inputs:
+      ram:
+        description: 'Installed polaris RAM in GiB (6 or 8)'
+        default: '8'
+        type: string
+      kernel_run:
+        description: 'kernel.yml run id (blank = latest successful)'
+        default: ''
+        type: string
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch kernel and EFI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          KRUN="${{ inputs.kernel_run }}"
+          if [ -z "$KRUN" ]; then
+            KRUN=$(gh run list -R "$GITHUB_REPOSITORY" -w kernel.yml --status success \
+                   --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          test -n "$KRUN"
+          echo "kernel run: $KRUN"
+          gh run download -R "$GITHUB_REPOSITORY" "$KRUN" -n platform-kernel-results -D out/kernel
+          test -f out/kernel/kernel.macho
+          test -f out/kernel/kernel.json
+          CRUN=$(gh run list -R "$GITHUB_REPOSITORY" -w checks.yml --status success \
+                 --limit 1 --json databaseId --jq '.[0].databaseId')
+          test -n "$CRUN"
+          gh run download -R "$GITHUB_REPOSITORY" "$CRUN" -n efi-results -D out/efi
+          test -f out/efi/efi/Build/Out/AARCH64-DEBUG/UniXNU.efi
+          test -f out/efi/loader/build/DarwinBoot/DEBUG_GCC/AARCH64/DarwinBoot.efi
+          python3 - <<'PY'
+          import json, pathlib
+          rep = json.loads(pathlib.Path('out/kernel/kernel.json').read_text())
+          print('prelinked        :', rep.get('original_components_prelinked'))
+          print('final link passed:', rep.get('final_configured_link_passed'))
+          if rep.get('original_components_prelinked') is not True:
+              raise SystemExit('this workflow needs a prelinked kernel (polaris_prelink_defconfig)')
+          PY
+
+      - name: Download the pinned IPSW
+        run: |
+          set -euo pipefail
+          URL=$(python3 -c "import tomllib;print(tomllib.load(open('board.toml','rb'))['ipsw']['url'])")
+          echo "IPSW: $URL"
+          curl -L --fail --retry 3 --retry-delay 5 -o out/restore.ipsw "$URL"
+          ls -l out/restore.ipsw
+
+      - name: Extract the two trust caches
+        run: |
+          set -euo pipefail
+          mkdir -p out/trust
+          echo "--- trustcache entries in the IPSW ---"
+          unzip -l out/restore.ipsw | grep -i trustcache | head -40 || true
+          STATIC=$(unzip -Z1 out/restore.ipsw | grep -i '044-76040-038.*trustcache' | head -1 || true)
+          SYSTEM=$(unzip -Z1 out/restore.ipsw | grep -i '044-76034-038.*trustcache' | head -1 || true)
+          echo "static: ${STATIC:-<none>}"
+          echo "system: ${SYSTEM:-<none>}"
+          test -n "$STATIC"
+          test -n "$SYSTEM"
+          unzip -p out/restore.ipsw "$STATIC" > out/trust/static.trustcache
+          unzip -p out/restore.ipsw "$SYSTEM" > out/trust/system.trustcache
+          ls -l out/trust
+          python3 - <<'PY'
+          import pathlib
+          for name in ('static', 'system'):
+              data = pathlib.Path(f'out/trust/{name}.trustcache').read_bytes()
+              print(name, len(data), 'bytes, IM4P' if b'IM4P' in data[:16] else 'bytes, NOT IM4P')
+              if b'IM4P' not in data[:16]:
+                  raise SystemExit(f'{name}.trustcache is not a DER IM4P')
+          PY
+
+      - name: Trust bundle, iPad ADT and the payload
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y mtools
+          python3 scripts/make-trust-bundle.py \
+            --static out/trust/static.trustcache \
+            --system out/trust/system.trustcache \
+            --out out/trust/trust.bundle
+          python3 scripts/make-polaris-adt.py \
+            --output out/polaris-ios.adt \
+            --ram "${{ inputs.ram }}" \
+            --ipad-identity \
+            --trust-cache
+          python3 scripts/make-ios-esp.py \
+            --kernel out/kernel/kernel.macho \
+            --adt out/polaris-ios.adt \
+            --trust out/trust/trust.bundle \
+            --efi out/efi \
+            --out out/ios-esp/ios-esp.img
+          ls -l out/ios-esp
+
+      - name: Verify the image
+        run: |
+          set -euo pipefail
+          mdir -i out/ios-esp/ios-esp.img ::/ > out/ios-esp/listing.txt
+          cat out/ios-esp/listing.txt
+          mdir -i out/ios-esp/ios-esp.img ::/EFI/UniXNU/Payloads/ >> out/ios-esp/listing.txt
+          grep -qi 'BOOTAA64' out/ios-esp/listing.txt
+          sha256sum out/ios-esp/ios-esp.img out/trust/trust.bundle out/polaris-ios.adt \
+            out/kernel/kernel.macho | tee out/ios-esp/sha256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polaris-ios-esp
+          path: |
+            out/ios-esp/ios-esp.img
+            out/ios-esp/listing.txt
+            out/ios-esp/sha256.txt
+            out/trust/trust.bundle
+            out/polaris-ios.adt
