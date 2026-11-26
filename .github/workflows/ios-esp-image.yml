@@ -14,13 +14,15 @@ on:
         default: '8'
         type: string
       kernel_run:
-        description: 'kernel.yml run id (blank = latest successful)'
-        default: ''
+        description: 'kernel.yml run id that produced platform-kernel-results (Actions -> that run -> URL number)'
+        default: '45638313933'
+        type: string
+      checks_run:
+        description: 'checks.yml run id that produced efi-results'
+        default: '45637612797'
         type: string
 permissions:
   contents: read
-  # gh run list/download reads the Actions API; without this the token is
-  # scoped to none for actions and every gh call returns 403.
   actions: read
 jobs:
   image:
@@ -32,57 +34,37 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Fetch kernel and EFI artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # Downloading an artifact from another run needs the run id; the official
+      # action does it with the workflow token. Resolving "the latest run" via
+      # `gh run list -w <file>` proved brittle here, so the ids are explicit
+      # inputs instead.
+      - name: Fetch the prelinked kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: platform-kernel-results
+          path: out/kernel
+          run-id: ${{ inputs.kernel_run }}
+          github-token: ${{ github.token }}
+
+      - name: Fetch the EFI build
+        uses: actions/download-artifact@v4
+        with:
+          name: efi-results
+          path: out/efi
+          run-id: ${{ inputs.checks_run }}
+          github-token: ${{ github.token }}
+
+      - name: Check both artifacts
         run: |
-          set -uo pipefail
-          echo "--- gh available? ---"
-          command -v gh || { echo "::error::gh is not on PATH"; exit 1; }
-          gh --version | head -2
-          echo "--- auth (token scopes) ---"
-          gh auth status 2>&1 || true
-          echo "--- recent kernel.yml runs ---"
-          gh run list -R "$GITHUB_REPOSITORY" -w kernel.yml --limit 5 \
-            --json databaseId,status,conclusion,headBranch \
-            --jq '.[] | "\(.databaseId) \(.status) \(.conclusion) \(.headBranch)"' 2>&1 || true
-          echo "--- recent checks.yml runs ---"
-          gh run list -R "$GITHUB_REPOSITORY" -w checks.yml --limit 5 \
-            --json databaseId,status,conclusion \
-            --jq '.[] | "\(.databaseId) \(.status) \(.conclusion)"' 2>&1 || true
-
-          KRUN="${{ inputs.kernel_run }}"
-          if [ -z "$KRUN" ]; then
-            KRUN=$(gh run list -R "$GITHUB_REPOSITORY" -w kernel.yml --status success --limit 1 \
-                   --json databaseId --jq '.[0].databaseId' 2>&1) || true
-          fi
-          echo "KRUN=[${KRUN:-<empty>}]"
-          if [ -z "$KRUN" ] || ! echo "$KRUN" | grep -qx '[0-9]\+'; then
-            echo "::error::could not resolve a successful kernel.yml run (got '${KRUN}')"
-            exit 1
-          fi
-
-          set -e
-          gh run download -R "$GITHUB_REPOSITORY" "$KRUN" -n platform-kernel-results -D out/kernel
-          echo "--- kernel artifact ---"
+          set -euo pipefail
+          echo "--- kernel ---"
           find out/kernel -type f -printf '%10s  %p\n'
+          echo "--- efi ---"
+          find out/efi -name '*.efi' -printf '%10s  %p\n'
           test -f out/kernel/kernel.macho
           test -f out/kernel/kernel.json
-
-          CRUN=$(gh run list -R "$GITHUB_REPOSITORY" -w checks.yml --status success --limit 1 \
-                 --json databaseId --jq '.[0].databaseId' 2>&1) || true
-          echo "CRUN=[${CRUN:-<empty>}]"
-          if [ -z "$CRUN" ] || ! echo "$CRUN" | grep -qx '[0-9]\+'; then
-            echo "::error::could not resolve a successful checks.yml run (got '${CRUN}')"
-            exit 1
-          fi
-
-          gh run download -R "$GITHUB_REPOSITORY" "$CRUN" -n efi-results -D out/efi
-          echo "--- efive artifact (directories of interest) ---"
-          find out/efi -name '*.efi' -printf '%10s  %p\n'
           test -f out/efi/efi/Build/Out/AARCH64-DEBUG/UniXNU.efi
           test -f out/efi/loader/build/DarwinBoot/DEBUG_GCC/AARCH64/DarwinBoot.efi
-
           python3 - <<'PY'
           import json, pathlib
           rep = json.loads(pathlib.Path('out/kernel/kernel.json').read_text())
