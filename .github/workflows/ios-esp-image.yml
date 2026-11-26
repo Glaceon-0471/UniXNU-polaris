@@ -130,14 +130,28 @@ jobs:
       - name: Verify the image
         run: |
           set -euo pipefail
-          mdir -i out/ios-esp/ios-esp.img ::/ > out/ios-esp/listing.txt
-          cat out/ios-esp/listing.txt
-          mdir -i out/ios-esp/ios-esp.img ::/EFI/UniXNU/Payloads/ >> out/ios-esp/listing.txt
-          grep -qi 'BOOTAA64' out/ios-esp/listing.txt
-          sha256sum out/ios-esp/ios-esp.img out/trust/trust.bundle out/polaris-ios.adt \
-            out/kernel/kernel.macho | tee out/ios-esp/sha256.txt
+          IMG=out/ios-esp/ios-esp.img
+          echo "--- image ---"
+          ls -l "$IMG"
+          # Recursive listing: the payload lives in EFI/BOOT/ and
+          # EFI/UniXNU/Payloads/, so a root-only listing proves nothing.
+          mdir -i "$IMG" -/ :: | tee out/ios-esp/listing.txt
+          for want in 'BOOTAA64.EFI' 'DarwinBoot.efi' 'kernel.macho' 'kernel.macho.adt' \
+                      'kernel.macho.trustcache' 'unixnu.toml'; do
+            if grep -qi -- "$want" out/ios-esp/listing.txt; then
+              echo "ok   $want"
+            else
+              echo "::error::missing from the ESP image: $want"
+              exit 1
+            fi
+          done
+          sha256sum "$IMG" out/trust/trust.bundle out/polaris-ios.adt out/kernel/kernel.macho \
+            | tee out/ios-esp/sha256.txt
 
       - uses: actions/upload-artifact@v4
+        # Keep the image even when verification fails: a bad assertion should not
+        # cost another 4.5 GB IPSW download.
+        if: always()
         with:
           name: polaris-ios-esp
           path: |
